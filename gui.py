@@ -6,7 +6,9 @@ Top-down pygame table view for Qwirkle:
     [Left's                              [Right's
      hand,        [   BOARD   ]           hand,
      face down]                           face down]
-            [ YOUR hand, face up + Sort buttons ]
+            [ YOUR hand, face up ]
+            [ Sort by Color/Shape ]
+            [ Confirm / Clear / Swap ]
 
 Seat / turn order is always You -> Left -> Across -> Right -> You ...
 
@@ -28,7 +30,6 @@ from game import Game
 SCREEN_W, SCREEN_H = 1440, 900
 BG_COLOR = (30, 34, 40)
 BOARD_BG = (42, 47, 56)
-GRID_LINE = (56, 62, 72)
 PANEL_COLOR = (24, 27, 32)
 TEXT_COLOR = (230, 230, 235)
 DIM_TEXT = (150, 155, 165)
@@ -37,37 +38,57 @@ SELECT_COLOR = (255, 215, 0)
 PENDING_COLOR = (120, 200, 255)
 ERROR_COLOR = (240, 90, 90)
 GOOD_COLOR = (120, 220, 140)
+VALID_SQUARE_COLOR = (90, 220, 120, 100)
 BUTTON_COLOR = (55, 61, 72)
 BUTTON_HOVER = (75, 82, 96)
+BUTTON_ACTIVE = (60, 110, 150)
 BUTTON_BORDER = (100, 108, 122)
 
-CELL_SIZE = 46
+DEFAULT_CELL_SIZE = 46
+MIN_CELL_SIZE = 14
+BOARD_PADDING_CELLS = 2   # empty margin (in cells) kept around played tiles
+ZOOM_LERP = 0.08
 TILE_MARGIN = 4
 
 HAND_TILE_SIZE = 56
 HAND_GAP = 8
 
-BOARD_RECT = pygame.Rect(330, 150, 780, 560)
+BOARD_RECT = pygame.Rect(330, 150, 780, 500)
+
+HAND_Y = BOARD_RECT.bottom + 14
+SORT_Y = HAND_Y + HAND_TILE_SIZE + 10
+ACTION_Y = SORT_Y + 32 + 12
+
+LEFT_PANEL = pygame.Rect(20, SCREEN_H - 220, 260, 200)
+RIGHT_PANEL = pygame.Rect(SCREEN_W - 280, SCREEN_H - 220, 260, 200)
 
 
 class Button:
-    def __init__(self, rect, label, callback, enabled_fn=None):
+    def __init__(self, rect, label, callback, enabled_fn=None, active_fn=None):
         self.rect = pygame.Rect(rect)
         self.label = label
         self.callback = callback
         self.enabled_fn = enabled_fn or (lambda: True)
+        self.active_fn = active_fn or (lambda: False)
 
     def enabled(self):
         return self.enabled_fn()
 
     def draw(self, surf, font, mouse_pos):
         enabled = self.enabled()
+        active = self.active_fn()
         hovered = enabled and self.rect.collidepoint(mouse_pos)
-        color = BUTTON_HOVER if hovered else BUTTON_COLOR
         if not enabled:
             color = (40, 43, 49)
+        elif active:
+            color = BUTTON_ACTIVE
+        elif hovered:
+            color = BUTTON_HOVER
+        else:
+            color = BUTTON_COLOR
         pygame.draw.rect(surf, color, self.rect, border_radius=6)
-        pygame.draw.rect(surf, BUTTON_BORDER, self.rect, 1, border_radius=6)
+        border = SELECT_COLOR if active else BUTTON_BORDER
+        pygame.draw.rect(surf, border, self.rect, 2 if active else 1, border_radius=6)
         text_color = TEXT_COLOR if enabled else DIM_TEXT
         txt = font.render(self.label, True, text_color)
         surf.blit(txt, txt.get_rect(center=self.rect.center))
@@ -95,17 +116,18 @@ class QwirkleGUI:
         self.human_name = human_name
         self.human = next(p for p in game.players if p.name == human_name)
 
-        # camera: world coords currently centered in BOARD_RECT
+        # camera: world coords centered in BOARD_RECT; both are animated
+        # automatically each frame (see _update_camera) -- no manual pan.
         self.cam_x, self.cam_y = 0.0, 0.0
-        self.dragging_cam = False
-        self.drag_start = None
-        self.cam_start = None
+        self.cell_size = float(DEFAULT_CELL_SIZE)
 
         # turn-local human state
         self.selected_hand_idx = None      # index into human.hand "armed" for placing
         self.pending = []                  # list of (x, y, tile, hand_index_used)
+        self.valid_squares = set()         # legal board squares for the armed tile
         self.swap_mode = False
         self.swap_selected = set()         # indices into human.hand marked to swap
+        self.active_sort = None            # None | 'color' | 'shape' -- stays applied
 
         self.opening_choice = None         # chosen tile set (list[Tile]) during a tied opening
         self.opening_options = None
@@ -116,7 +138,9 @@ class QwirkleGUI:
 
         self.log = []  # recent turn history strings, newest last
 
-        self.next_bot_move_time = None
+        # Ready to move immediately -- if the randomly-chosen first player
+        # is a bot, this must NOT be None or the bot turn never fires.
+        self.next_bot_move_time = time.time()
         self.game_over_shown = False
 
         self._build_buttons()
@@ -125,21 +149,26 @@ class QwirkleGUI:
     # ------------------------------------------------------------ setup --
 
     def _build_buttons(self):
-        by = BOARD_RECT.bottom + 90
-        self.btn_sort_color = Button((BOARD_RECT.centerx - 160, by, 150, 32),
-                                      "Sort by Color", self._sort_color)
-        self.btn_sort_shape = Button((BOARD_RECT.centerx + 10, by, 150, 32),
-                                      "Sort by Shape", self._sort_shape)
+        sort_w, sort_gap = 150, 20
+        total = sort_w * 2 + sort_gap
+        sx = BOARD_RECT.centerx - total // 2
+        self.btn_sort_color = Button((sx, SORT_Y, sort_w, 32), "Sort by Color",
+                                      self._sort_color, active_fn=lambda: self.active_sort == "color")
+        self.btn_sort_shape = Button((sx + sort_w + sort_gap, SORT_Y, sort_w, 32), "Sort by Shape",
+                                      self._sort_shape, active_fn=lambda: self.active_sort == "shape")
 
-        panel_x = BOARD_RECT.right + 40
-        self.btn_confirm = Button((panel_x, 300, 170, 38), "Confirm Move",
+        act_w, act_gap = 150, 10
+        act_total = act_w * 4 + act_gap * 3
+        ax = BOARD_RECT.centerx - act_total // 2
+        self.btn_confirm = Button((ax, ACTION_Y, act_w, 34), "Confirm Move",
                                    self._confirm_move, self._can_confirm_place)
-        self.btn_clear = Button((panel_x, 346, 170, 38), "Clear Placement",
+        self.btn_clear = Button((ax + (act_w + act_gap), ACTION_Y, act_w, 34), "Clear Placement",
                                  self._clear_pending, lambda: len(self.pending) > 0)
-        self.btn_swap_toggle = Button((panel_x, 410, 170, 38), "Swap Tiles...",
+        self.btn_swap_toggle = Button((ax + 2 * (act_w + act_gap), ACTION_Y, act_w, 34), "Swap Tiles...",
                                        self._toggle_swap_mode,
-                                       lambda: not self.game.is_first_move_of_game())
-        self.btn_confirm_swap = Button((panel_x, 456, 170, 38), "Confirm Swap",
+                                       lambda: not self.game.is_first_move_of_game(),
+                                       active_fn=lambda: self.swap_mode)
+        self.btn_confirm_swap = Button((ax + 3 * (act_w + act_gap), ACTION_Y, act_w, 34), "Confirm Swap",
                                         self._confirm_swap,
                                         lambda: self.swap_mode and len(self.swap_selected) > 0)
 
@@ -158,33 +187,57 @@ class QwirkleGUI:
     # ------------------------------------------------------------ coords --
 
     def world_to_screen(self, wx, wy):
-        sx = BOARD_RECT.centerx + (wx - self.cam_x) * CELL_SIZE
-        sy = BOARD_RECT.centery + (wy - self.cam_y) * CELL_SIZE
+        sx = BOARD_RECT.centerx + (wx - self.cam_x) * self.cell_size
+        sy = BOARD_RECT.centery + (wy - self.cam_y) * self.cell_size
         return sx, sy
 
     def screen_to_world_cell(self, sx, sy):
-        wx = (sx - BOARD_RECT.centerx) / CELL_SIZE + self.cam_x
-        wy = (sy - BOARD_RECT.centery) / CELL_SIZE + self.cam_y
+        wx = (sx - BOARD_RECT.centerx) / self.cell_size + self.cam_x
+        wy = (sy - BOARD_RECT.centery) / self.cell_size + self.cam_y
         return int(round(wx)), int(round(wy))
 
-    def _center_camera_on_board(self):
+    def _visible_world_bounds(self):
+        x0, y0 = self.screen_to_world_cell(BOARD_RECT.left, BOARD_RECT.top)
+        x1, y1 = self.screen_to_world_cell(BOARD_RECT.right, BOARD_RECT.bottom)
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+    def _update_camera(self):
+        """Called every frame: keeps the board centered and smoothly zooms
+        out just enough that all played tiles stay comfortably in view."""
         b = self.game.board.bounds()
         if b is None:
-            self.cam_x, self.cam_y = 0.0, 0.0
+            target_cx, target_cy, target_cell = 0.0, 0.0, DEFAULT_CELL_SIZE
         else:
             min_x, min_y, max_x, max_y = b
-            self.cam_x = (min_x + max_x) / 2
-            self.cam_y = (min_y + max_y) / 2
+            w_cells = (max_x - min_x + 1) + BOARD_PADDING_CELLS * 2
+            h_cells = (max_y - min_y + 1) + BOARD_PADDING_CELLS * 2
+            fit_w = BOARD_RECT.width / max(1, w_cells)
+            fit_h = BOARD_RECT.height / max(1, h_cells)
+            target_cell = max(MIN_CELL_SIZE, min(DEFAULT_CELL_SIZE, fit_w, fit_h))
+            target_cx = (min_x + max_x) / 2
+            target_cy = (min_y + max_y) / 2
+
+        self.cell_size += (target_cell - self.cell_size) * ZOOM_LERP
+        self.cam_x += (target_cx - self.cam_x) * ZOOM_LERP
+        self.cam_y += (target_cy - self.cam_y) * ZOOM_LERP
 
     # ------------------------------------------------------------ actions --
 
     def _sort_color(self):
         self._clear_pending()
+        self.active_sort = "color"
         self.human.sort_by_color()
 
     def _sort_shape(self):
         self._clear_pending()
+        self.active_sort = "shape"
         self.human.sort_by_shape()
+
+    def _apply_active_sort(self):
+        if self.active_sort == "color":
+            self.human.sort_by_color()
+        elif self.active_sort == "shape":
+            self.human.sort_by_shape()
 
     def _toggle_swap_mode(self):
         self.swap_mode = not self.swap_mode
@@ -213,7 +266,7 @@ class QwirkleGUI:
         self._set_message(msg, GOOD_COLOR)
         self.log.append(f"You: +{res.score}" + (" QWIRKLE!" if res.qwirkles else ""))
         self.pending = []
-        self._center_camera_on_board()
+        self._apply_active_sort()
         self._refresh_opening_state()
         self._after_turn(res)
 
@@ -227,11 +280,13 @@ class QwirkleGUI:
         self.log.append(f"You: swapped {len(tiles)} tile(s)")
         self.swap_mode = False
         self.swap_selected = set()
+        self._apply_active_sort()
         self._after_turn(res)
 
     def _clear_pending(self):
         self.pending = []
         self.selected_hand_idx = None
+        self.valid_squares = set()
 
     def _set_message(self, text, color, seconds=4):
         self.message = text
@@ -267,7 +322,7 @@ class QwirkleGUI:
         g = self.game
         if g.game_over or g.current_player.name == self.human_name:
             return
-        if self.next_bot_move_time is None or time.time() < self.next_bot_move_time:
+        if time.time() < self.next_bot_move_time:
             return
 
         player = g.current_player
@@ -275,8 +330,8 @@ class QwirkleGUI:
         info = self._build_info()
         try:
             action, payload = bot.choose_move(g.board, list(player.hand), info)
-        except Exception as e:
-            action, payload = "swap", player.hand[:1] if not g.is_first_move_of_game() else None
+        except Exception:
+            action, payload = "swap", (player.hand[:1] if not g.is_first_move_of_game() else None)
 
         if action == "place" and payload:
             res = g.play_place(payload)
@@ -286,11 +341,12 @@ class QwirkleGUI:
             res = None
 
         if res is None or not res.ok:
-            # bot returned something illegal / gave up -- fall back safely
+            # bot returned something illegal / gave up -- fall back safely.
+            # (Opening turns always have a valid forced move, so this
+            # fallback only ever applies after the game's first move.)
             if not g.is_first_move_of_game() and player.hand:
                 res = g.play_swap([player.hand[0]])
             if res is None or not res.ok:
-                # truly stuck (shouldn't normally happen) -- skip via smallest swap
                 self.next_bot_move_time = time.time() + 0.5
                 return
 
@@ -304,12 +360,10 @@ class QwirkleGUI:
         self.log.append(tag)
         self.log = self.log[-8:]
 
-        self._center_camera_on_board()
         self._refresh_opening_state()
 
         if res.game_over:
             self.game_over_shown = True
-            self.next_bot_move_time = None
         else:
             self.next_bot_move_time = time.time() + 0.7
 
@@ -320,15 +374,61 @@ class QwirkleGUI:
         n = len(self.human.hand)
         total_w = n * HAND_TILE_SIZE + (n - 1) * HAND_GAP
         start_x = BOARD_RECT.centerx - total_w // 2
-        y = BOARD_RECT.bottom + 20
         rects = []
         for i in range(n):
             x = start_x + i * (HAND_TILE_SIZE + HAND_GAP)
-            rects.append(pygame.Rect(x, y, HAND_TILE_SIZE, HAND_TILE_SIZE))
+            rects.append(pygame.Rect(x, HAND_Y, HAND_TILE_SIZE, HAND_TILE_SIZE))
         return rects
 
     def _used_hand_indices(self):
         return {idx for (_, _, _, idx) in self.pending}
+
+    def _compute_valid_squares(self):
+        """Every empty square where the currently-armed hand tile could
+        legally be placed, given whatever's already pending this turn."""
+        self.valid_squares = set()
+        if self.swap_mode or self.selected_hand_idx is None:
+            return
+        if self.selected_hand_idx in self._used_hand_indices():
+            return
+
+        tile = self.human.hand[self.selected_hand_idx]
+        board = self.game.board
+        pending_move = [(x, y, t) for (x, y, t, _) in self.pending]
+        occupied = set(board.cells.keys()) | {(x, y) for (x, y, _) in pending_move}
+
+        candidates = set()
+        if pending_move:
+            xs = {x for x, y, _ in pending_move}
+            ys = {y for x, y, _ in pending_move}
+            if len(pending_move) == 1:
+                x0, y0 = pending_move[0][0], pending_move[0][1]
+                for d in range(-6, 7):
+                    candidates.add((x0 + d, y0))
+                    candidates.add((x0, y0 + d))
+            elif len(xs) == 1:
+                x0 = next(iter(xs))
+                ymin, ymax = min(ys), max(ys)
+                for y in range(ymin - 6, ymax + 7):
+                    candidates.add((x0, y))
+            elif len(ys) == 1:
+                y0 = next(iter(ys))
+                xmin, xmax = min(xs), max(xs)
+                for x in range(xmin - 6, xmax + 7):
+                    candidates.add((x, y0))
+        elif board.cells:
+            candidates = set(board.legal_anchor_squares())
+        else:
+            x0, y0, x1, y1 = self._visible_world_bounds()
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    candidates.add((x, y))
+
+        candidates -= occupied
+        for (x, y) in candidates:
+            ok, _ = board.validate_move(pending_move + [(x, y, tile)])
+            if ok:
+                self.valid_squares.add((x, y))
 
     def _on_hand_click(self, i):
         if self.swap_mode:
@@ -352,6 +452,7 @@ class QwirkleGUI:
                 self._set_message("That tile isn't part of your chosen opening set.", ERROR_COLOR, 3)
                 return
         self.selected_hand_idx = None if self.selected_hand_idx == i else i
+        self._compute_valid_squares()
 
     def _on_board_click(self, wx, wy):
         if self.swap_mode:
@@ -362,12 +463,16 @@ class QwirkleGUI:
         for p in list(self.pending):
             if (p[0], p[1]) == (wx, wy):
                 self.pending.remove(p)
+                self._compute_valid_squares()
                 return
         if self.selected_hand_idx is None:
             return
+        if (wx, wy) not in self.valid_squares:
+            return  # not a legal spot for the armed tile -- ignore the click
         tile = self.human.hand[self.selected_hand_idx]
         self.pending.append((wx, wy, tile, self.selected_hand_idx))
         self.selected_hand_idx = None
+        self._compute_valid_squares()
 
     # ------------------------------------------------------------- events --
 
@@ -379,53 +484,22 @@ class QwirkleGUI:
         is_human_turn = (self.game.current_player.name == self.human_name
                           and not self.game.game_over)
 
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:
-                for b in self.buttons:
-                    if b.handle_click(event.pos):
-                        return
-                if is_human_turn:
-                    for i, r in enumerate(self._hand_rects()):
-                        if r.collidepoint(event.pos):
-                            self._on_hand_click(i)
-                            return
-                    if BOARD_RECT.collidepoint(event.pos):
-                        wx, wy = self.screen_to_world_cell(*event.pos)
-                        self._on_board_click(wx, wy)
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for b in self.buttons:
+                if b.handle_click(event.pos):
+                    return
+            if is_human_turn:
+                for i, r in enumerate(self._hand_rects()):
+                    if r.collidepoint(event.pos):
+                        self._on_hand_click(i)
                         return
                 if BOARD_RECT.collidepoint(event.pos):
-                    self.dragging_cam = True
-                    self.drag_start = event.pos
-                    self.cam_start = (self.cam_x, self.cam_y)
-            elif event.button in (2, 3):
-                self.dragging_cam = True
-                self.drag_start = event.pos
-                self.cam_start = (self.cam_x, self.cam_y)
-
-        elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button in (1, 2, 3):
-                self.dragging_cam = False
-
-        elif event.type == pygame.MOUSEMOTION:
-            if self.dragging_cam and self.drag_start:
-                dx = event.pos[0] - self.drag_start[0]
-                dy = event.pos[1] - self.drag_start[1]
-                self.cam_x = self.cam_start[0] - dx / CELL_SIZE
-                self.cam_y = self.cam_start[1] - dy / CELL_SIZE
+                    wx, wy = self.screen_to_world_cell(*event.pos)
+                    self._on_board_click(wx, wy)
+                    return
 
         elif event.type == pygame.KEYDOWN:
-            step = 1.0
-            if event.key == pygame.K_LEFT:
-                self.cam_x -= step
-            elif event.key == pygame.K_RIGHT:
-                self.cam_x += step
-            elif event.key == pygame.K_UP:
-                self.cam_y -= step
-            elif event.key == pygame.K_DOWN:
-                self.cam_y += step
-            elif event.key == pygame.K_c:
-                self._center_camera_on_board()
-            elif event.key == pygame.K_ESCAPE and is_human_turn:
+            if event.key == pygame.K_ESCAPE and is_human_turn:
                 self._clear_pending()
                 self.swap_mode = False
                 self.swap_selected = set()
@@ -484,33 +558,37 @@ class QwirkleGUI:
         if highlight:
             pygame.draw.rect(self.screen, highlight, rect, 3, border_radius=6)
 
+    def _draw_valid_squares(self):
+        if not self.valid_squares:
+            return
+        size = max(2, self.cell_size - 2)
+        hi_surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        hi_surf.fill(VALID_SQUARE_COLOR)
+        for (x, y) in self.valid_squares:
+            sx, sy = self.world_to_screen(x, y)
+            if BOARD_RECT.collidepoint(sx, sy):
+                rect = hi_surf.get_rect(center=(sx, sy))
+                self.screen.blit(hi_surf, rect)
+
     def draw_board(self):
         pygame.draw.rect(self.screen, BOARD_BG, BOARD_RECT)
-        # grid
-        cols = BOARD_RECT.width // CELL_SIZE + 2
-        rows = BOARD_RECT.height // CELL_SIZE + 2
-        offset_x = (BOARD_RECT.centerx - self.cam_x * CELL_SIZE) % CELL_SIZE
-        offset_y = (BOARD_RECT.centery - self.cam_y * CELL_SIZE) % CELL_SIZE
-        for c in range(-1, cols):
-            x = BOARD_RECT.left + offset_x + c * CELL_SIZE
-            pygame.draw.line(self.screen, GRID_LINE, (x, BOARD_RECT.top), (x, BOARD_RECT.bottom))
-        for r in range(-1, rows):
-            y = BOARD_RECT.top + offset_y + r * CELL_SIZE
-            pygame.draw.line(self.screen, GRID_LINE, (BOARD_RECT.left, y), (BOARD_RECT.right, y))
 
         clip = self.screen.get_clip()
         self.screen.set_clip(BOARD_RECT)
 
+        self._draw_valid_squares()
+
+        tsize = max(1, self.cell_size - TILE_MARGIN)
         for (x, y), tile in self.game.board.cells.items():
             sx, sy = self.world_to_screen(x, y)
             if BOARD_RECT.collidepoint(sx, sy):
-                rect = pygame.Rect(0, 0, CELL_SIZE - TILE_MARGIN, CELL_SIZE - TILE_MARGIN)
+                rect = pygame.Rect(0, 0, tsize, tsize)
                 rect.center = (sx, sy)
                 self.draw_tile(rect, tile, face_up=True)
 
         for (x, y, tile, _) in self.pending:
             sx, sy = self.world_to_screen(x, y)
-            rect = pygame.Rect(0, 0, CELL_SIZE - TILE_MARGIN, CELL_SIZE - TILE_MARGIN)
+            rect = pygame.Rect(0, 0, tsize, tsize)
             rect.center = (sx, sy)
             self.draw_tile(rect, tile, face_up=True, highlight=PENDING_COLOR)
 
@@ -538,45 +616,55 @@ class QwirkleGUI:
                     highlight = (90, 160, 90)
             self.draw_tile(r, tile, face_up=True, highlight=highlight)
 
-    def draw_face_down_row(self, center_x, top_y, count, horizontal=True):
-        size = HAND_TILE_SIZE
-        gap = HAND_GAP
-        total = count * size + (count - 1) * gap
+    def draw_face_down_row(self, center_x, center_y, count, horizontal=True):
+        """Draws `count` face-down tiles centered on (center_x, center_y),
+        laid out horizontally or vertically. Returns the tile rects, in
+        order, so callers can position labels relative to them."""
+        size, gap = HAND_TILE_SIZE, HAND_GAP
+        total = count * size + max(0, count - 1) * gap
+        rects = []
         if horizontal:
-            start = center_x - total // 2
+            start_x = center_x - total // 2
+            y = center_y - size // 2
             for i in range(count):
-                rect = pygame.Rect(start + i * (size + gap), top_y, size, size)
+                rect = pygame.Rect(start_x + i * (size + gap), y, size, size)
                 self.draw_tile(rect, None, face_up=False)
+                rects.append(rect)
         else:
-            start = top_y - total // 2
+            start_y = center_y - total // 2
+            x = center_x - size // 2
             for i in range(count):
-                rect = pygame.Rect(center_x, start + i * (size + gap), size, size)
+                rect = pygame.Rect(x, start_y + i * (size + gap), size, size)
                 self.draw_tile(rect, None, face_up=False)
+                rects.append(rect)
+        return rects
 
     def draw_opponents(self):
         left_p = self.game.players[1]
         across_p = self.game.players[2]
         right_p = self.game.players[3]
 
-        # Across (top)
-        self.draw_face_down_row(BOARD_RECT.centerx, 30, len(across_p.hand), horizontal=True)
-        # Left
-        self.draw_face_down_row(60, BOARD_RECT.centery - 3 * (HAND_TILE_SIZE + HAND_GAP) // 2,
-                                 len(left_p.hand), horizontal=False)
-        # Right
-        self.draw_face_down_row(SCREEN_W - 60 - HAND_TILE_SIZE,
-                                 BOARD_RECT.centery - 3 * (HAND_TILE_SIZE + HAND_GAP) // 2,
-                                 len(right_p.hand), horizontal=False)
+        across_rects = self.draw_face_down_row(BOARD_RECT.centerx, 70, len(across_p.hand), horizontal=True)
+        left_rects = self.draw_face_down_row(90, BOARD_RECT.centery, len(left_p.hand), horizontal=False)
+        right_rects = self.draw_face_down_row(SCREEN_W - 90, BOARD_RECT.centery, len(right_p.hand), horizontal=False)
 
-        self._label(across_p, (BOARD_RECT.centerx, 8), center=True)
-        self._label(left_p, (60 + HAND_TILE_SIZE // 2, BOARD_RECT.centery - 130), center=True)
-        self._label(right_p, (SCREEN_W - 60 - HAND_TILE_SIZE // 2, BOARD_RECT.centery - 130), center=True)
+        if across_rects:
+            top_y = min(r.top for r in across_rects) - 18
+            self._label(across_p, (BOARD_RECT.centerx, top_y), center=True)
+        if left_rects:
+            pos = (left_rects[0].centerx, left_rects[0].top - 16)
+            self._label(left_p, pos, center=True, rotate=-90)  # 90 degrees clockwise
+        if right_rects:
+            pos = (right_rects[0].centerx, right_rects[0].top - 16)
+            self._label(right_p, pos, center=True, rotate=90)  # 90 degrees counter-clockwise
 
-    def _label(self, player, pos, center=False):
+    def _label(self, player, pos, center=False, rotate=0):
         turn = self.game.current_player is player
         color = SELECT_COLOR if turn else TEXT_COLOR
-        text = f"{player.name}  ({player.score} pts)" + ("  <- turn" if turn else "")
+        text = f"{player.name} ({player.score})" + (" <-" if turn else "")
         surf = self.font.render(text, True, color)
+        if rotate:
+            surf = pygame.transform.rotate(surf, rotate)
         rect = surf.get_rect()
         if center:
             rect.center = pos
@@ -585,7 +673,7 @@ class QwirkleGUI:
         self.screen.blit(surf, rect)
 
     def draw_scoreboard(self):
-        panel = pygame.Rect(20, 20, 280, 200)
+        panel = LEFT_PANEL
         pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=8)
         pygame.draw.rect(self.screen, BUTTON_BORDER, panel, 1, border_radius=8)
         title = self.font_med.render("Standings", True, TEXT_COLOR)
@@ -600,7 +688,7 @@ class QwirkleGUI:
         self.screen.blit(bag_txt, (panel.left + 12, panel.bottom - 26))
 
     def draw_log(self):
-        panel = pygame.Rect(20, 240, 280, 200)
+        panel = RIGHT_PANEL
         pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=8)
         pygame.draw.rect(self.screen, BUTTON_BORDER, panel, 1, border_radius=8)
         title = self.font_med.render("Log", True, TEXT_COLOR)
@@ -608,27 +696,6 @@ class QwirkleGUI:
         for i, line in enumerate(self.log[-6:]):
             txt = self.font_small.render(line, True, DIM_TEXT)
             self.screen.blit(txt, (panel.left + 12, panel.top + 44 + i * 22))
-
-    def draw_side_panel(self):
-        panel_x = BOARD_RECT.right + 40
-        title = self.font_med.render("Actions", True, TEXT_COLOR)
-        self.screen.blit(title, (panel_x, 260))
-        for b in (self.btn_confirm, self.btn_clear, self.btn_swap_toggle, self.btn_confirm_swap):
-            b.draw(self.screen, self.font, pygame.mouse.get_pos())
-        hint_y = 510
-        hints = [
-            "Click a tile in your hand,",
-            "then click the board to place it.",
-            "Click a placed (blue) tile to undo it.",
-            "All tiles in a turn must form",
-            "one straight line touching the board.",
-            "",
-            "Right/middle-drag or arrow keys",
-            "to pan the board. Press C to re-center.",
-        ]
-        for i, h in enumerate(hints):
-            txt = self.font_small.render(h, True, DIM_TEXT)
-            self.screen.blit(txt, (panel_x, hint_y + i * 18))
 
     def draw_message(self):
         if self.message and time.time() < self.message_until:
@@ -655,9 +722,8 @@ class QwirkleGUI:
         self.draw_board()
         self.draw_opponents()
         self.draw_human_hand()
-        self.btn_sort_color.draw(self.screen, self.font, pygame.mouse.get_pos())
-        self.btn_sort_shape.draw(self.screen, self.font, pygame.mouse.get_pos())
-        self.draw_side_panel()
+        for b in self.buttons:
+            b.draw(self.screen, self.font, pygame.mouse.get_pos())
         self.draw_scoreboard()
         self.draw_log()
         self.draw_message()
@@ -668,7 +734,6 @@ class QwirkleGUI:
     # ---------------------------------------------------------------- loop --
 
     def run(self):
-        self._center_camera_on_board()
         running = True
         while running:
             for event in pygame.event.get():
@@ -683,6 +748,7 @@ class QwirkleGUI:
                 self.handle_event(event)
 
             self._maybe_run_bot_turn()
+            self._update_camera()
             self.draw()
             self.clock.tick(60)
 

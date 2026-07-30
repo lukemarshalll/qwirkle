@@ -48,5 +48,5 @@ class Player:
 
     def sort_by_shape(self):
         shape_order = {s: i for i, s in enumerate(
-            ["Circle", "Star", "Diamond", "Square", "Clover", "X"])}
+            ["Circle", "Star", "Diamond", "Square", "Clover", "Triangle"])}
         self.hand.sort(key=lambda t: (shape_order[t.shape], t.color))

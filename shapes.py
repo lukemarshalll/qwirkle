@@ -1,8 +1,8 @@
 """
 shapes.py
-Draws the six Qwirkle shapes (Circle, Star, Diamond, Square, Clover, X)
-onto a pygame surface. Kept separate from gui.py so the art is easy to
-tweak without wading through layout code.
+Draws the six Qwirkle shapes (Circle, Star, Diamond, Square, Clover,
+Triangle) onto a pygame surface. Kept separate from gui.py so the art is
+easy to tweak without wading through layout code.
 """
 
 import math
@@ -26,7 +26,7 @@ def _star_points(center, outer_r, inner_r, points=5, rotation=-90):
 
 def draw_shape(surface, shape, center, size, color, outline=BLACK, outline_w=2):
     """
-    shape: one of Circle, Star, Diamond, Square, Clover, X
+    shape: one of Circle, Star, Diamond, Square, Clover, Triangle
     center: (x, y) pixel center
     size: roughly the shape's radius/half-width in pixels
     """
@@ -52,10 +52,11 @@ def draw_shape(surface, shape, center, size, color, outline=BLACK, outline_w=2):
         pygame.draw.polygon(surface, color, pts)
         pygame.draw.polygon(surface, outline, pts, outline_w)
 
-    elif shape == "X":
-        w = max(3, int(size * 0.42))
-        _thick_line(surface, color, (cx - size, cy - size), (cx + size, cy + size), w, outline, outline_w)
-        _thick_line(surface, color, (cx - size, cy + size), (cx + size, cy - size), w, outline, outline_w)
+    elif shape == "Triangle":
+        h = size * 1.3
+        pts = [(cx, cy - h * 0.62), (cx - size, cy + h * 0.38), (cx + size, cy + h * 0.38)]
+        pygame.draw.polygon(surface, color, pts)
+        pygame.draw.polygon(surface, outline, pts, outline_w)
 
     elif shape == "Clover":
         # A 3-leaf clover: three overlapping circular "leaves" arranged in a
@@ -76,17 +77,3 @@ def draw_shape(surface, shape, center, size, color, outline=BLACK, outline_w=2):
 
     else:
         raise ValueError(f"Unknown shape: {shape}")
-
-
-def _thick_line(surface, color, p1, p2, width, outline, outline_w):
-    x1, y1 = p1
-    x2, y2 = p2
-    dx, dy = x2 - x1, y2 - y1
-    length = math.hypot(dx, dy) or 1
-    nx, ny = -dy / length * (width / 2), dx / length * (width / 2)
-    pts = [
-        (x1 + nx, y1 + ny), (x2 + nx, y2 + ny),
-        (x2 - nx, y2 - ny), (x1 - nx, y1 - ny),
-    ]
-    pygame.draw.polygon(surface, color, pts)
-    pygame.draw.polygon(surface, outline, pts, max(1, outline_w - 1))

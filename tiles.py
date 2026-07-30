@@ -6,7 +6,7 @@ Defines the Tile object and the TileBag (the draw pile of all 108 tiles).
 import random
 
 COLORS = ["Red", "Orange", "Yellow", "Green", "Blue", "Purple"]
-SHAPES = ["Circle", "Star", "Diamond", "Square", "Clover", "X"]
+SHAPES = ["Circle", "Star", "Diamond", "Square", "Clover", "Triangle"]
 
 # How each shape/color is drawn (used by the GUI). Kept here so both the
 # GUI and any headless/debug rendering share one source of truth.
