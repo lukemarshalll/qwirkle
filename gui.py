@@ -138,9 +138,10 @@ class QwirkleGUI:
 
         self.log = []  # recent turn history strings, newest last
 
-        # Ready to move immediately -- if the randomly-chosen first player
-        # is a bot, this must NOT be None or the bot turn never fires.
-        self.next_bot_move_time = time.time()
+        # Ready to move shortly -- if the randomly-chosen first player is a
+        # bot, this must be a real timestamp (not None) or the bot turn
+        # never fires.
+        self.next_bot_move_time = time.time() + 1.0
         self.game_over_shown = False
 
         self._build_buttons()
@@ -297,8 +298,8 @@ class QwirkleGUI:
         if res.game_over:
             self.game_over_shown = True
             return
-        # schedule bot turns to run with a short human-readable delay
-        self.next_bot_move_time = time.time() + 0.5
+        # schedule bot turns to run with a human-readable delay
+        self.next_bot_move_time = time.time() + 1.3
 
     # -------------------------------------------------------- bot driving --
 
@@ -347,7 +348,7 @@ class QwirkleGUI:
             if not g.is_first_move_of_game() and player.hand:
                 res = g.play_swap([player.hand[0]])
             if res is None or not res.ok:
-                self.next_bot_move_time = time.time() + 0.5
+                self.next_bot_move_time = time.time() + 1.0
                 return
 
         tag = f"{player.name}: "
@@ -365,7 +366,7 @@ class QwirkleGUI:
         if res.game_over:
             self.game_over_shown = True
         else:
-            self.next_bot_move_time = time.time() + 0.7
+            self.next_bot_move_time = time.time() + 1.5
 
     # --------------------------------------------------------- hand click --
 
@@ -560,6 +561,11 @@ class QwirkleGUI:
 
     def _draw_valid_squares(self):
         if not self.valid_squares:
+            return
+        if not self.game.board.cells and not self.pending:
+            # Very first tile of the whole game -- any empty square is
+            # legal, so highlighting would just paint the entire visible
+            # board green. Leave it blank; placement still works anywhere.
             return
         size = max(2, self.cell_size - 2)
         hi_surf = pygame.Surface((size, size), pygame.SRCALPHA)
