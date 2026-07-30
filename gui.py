@@ -658,10 +658,10 @@ class QwirkleGUI:
             top_y = min(r.top for r in across_rects) - 18
             self._label(across_p, (BOARD_RECT.centerx, top_y), center=True)
         if left_rects:
-            pos = (left_rects[0].centerx, left_rects[0].top - 16)
+            pos = (left_rects[0].right + 26, BOARD_RECT.centery)
             self._label(left_p, pos, center=True, rotate=-90)  # 90 degrees clockwise
         if right_rects:
-            pos = (right_rects[0].centerx, right_rects[0].top - 16)
+            pos = (right_rects[0].left - 26, BOARD_RECT.centery)
             self._label(right_p, pos, center=True, rotate=90)  # 90 degrees counter-clockwise
 
     def _label(self, player, pos, center=False, rotate=0):
