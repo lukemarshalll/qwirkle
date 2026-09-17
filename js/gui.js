@@ -153,9 +153,13 @@ export class QwirkleGUI {
     this.mouseX = -1;
     this.mouseY = -1;
 
-    // Ready to move shortly -- if the randomly-chosen first player is a
-    // bot, this must be a real timestamp (not null) or the bot turn
-    // never fires.
+    // The game doesn't actually begin (no bot turns, no input) until the
+    // player clicks Start on the title screen.
+    this.gameStarted = false;
+
+    // Ready to move shortly after Start is clicked -- if the
+    // randomly-chosen first player is a bot, this must be a real
+    // timestamp (not null) or the bot turn never fires.
     this.nextBotMoveTime = performance.now() + 1000;
     this.gameOverShown = false;
 
@@ -250,6 +254,14 @@ export class QwirkleGUI {
     this.btnPlayAgain = new Button(
       new Rect(goX, goY, goW, goH), "Play Again",
       () => this._restartGame(), () => this.game.gameOver
+    );
+
+    // Title-screen Start button -- centered, below where "Qwirkle!" is drawn.
+    const startW = 220, startH = 60;
+    this.btnStart = new Button(
+      new Rect(this.screenW / 2 - startW / 2, this.screenH / 2 + 20, startW, startH),
+      "Start",
+      () => this._startGame()
     );
   }
 
@@ -396,6 +408,13 @@ export class QwirkleGUI {
     this.nextBotMoveTime = performance.now() + 1300;
   }
 
+  _startGame() {
+    this.gameStarted = true;
+    // give it a fresh short delay in case the player sat on the title
+    // screen for a while (otherwise a bot going first would fire instantly)
+    this.nextBotMoveTime = performance.now() + 1000;
+  }
+
   _restartGame() {
     const names = this.game.players.map((p) => p.name);
     const botsMap = {};
@@ -447,6 +466,7 @@ export class QwirkleGUI {
   }
 
   _maybeRunBotTurn() {
+    if (!this.gameStarted) return;
     const g = this.game;
     if (g.gameOver || g.currentPlayer.name === this.humanName) return;
     if (performance.now() < this.nextBotMoveTime) return;
@@ -630,11 +650,16 @@ export class QwirkleGUI {
   }
 
   _isHumanTurn() {
-    return this.game.currentPlayer.name === this.humanName && !this.game.gameOver;
+    return this.gameStarted && this.game.currentPlayer.name === this.humanName && !this.game.gameOver;
   }
 
   _onClick(e) {
     const x = e.offsetX, y = e.offsetY;
+
+    if (!this.gameStarted) {
+      this.btnStart.handleClick(x, y);
+      return;
+    }
 
     if (this.openingOptions && this.openingOptions.length > 1 && this.openingChoice === null
         && this.game.currentPlayer.name === this.humanName) {
@@ -666,6 +691,7 @@ export class QwirkleGUI {
   }
 
   _onKeyDown(e) {
+    if (!this.gameStarted) return;
     if (e.key === "Escape" && this._isHumanTurn()) {
       this._clearPending();
       this.swapMode = false;
@@ -994,10 +1020,42 @@ export class QwirkleGUI {
     this.btnPlayAgain.draw(ctx, this.mouseX, this.mouseY, 17);
   }
 
+  _drawStartScreen() {
+    const ctx = this.ctx;
+
+    // The normal board scene, blurred, as a backdrop. The board is a
+    // freshly-dealt real game (empty board, real hands) so this isn't a
+    // fake mockup -- it's exactly what the player is about to see.
+    ctx.save();
+    ctx.filter = "blur(6px)";
+    this.drawBoard();
+    this.drawOpponents();
+    this.drawHumanHand();
+    this.drawScoreboard();
+    this.drawLog();
+    ctx.restore();
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(0, 0, this.screenW, this.screenH);
+
+    ctx.fillStyle = TEXT_COLOR;
+    ctx.font = "bold 72px Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Qwirkle!", this.screenW / 2, this.screenH / 2 - 60);
+
+    this.btnStart.draw(ctx, this.mouseX, this.mouseY, 22);
+  }
+
   draw() {
     const ctx = this.ctx;
     ctx.fillStyle = BG_COLOR;
     ctx.fillRect(0, 0, this.screenW, this.screenH);
+
+    if (!this.gameStarted) {
+      this._drawStartScreen();
+      return;
+    }
 
     this.drawBoard();
     this.drawOpponents();
